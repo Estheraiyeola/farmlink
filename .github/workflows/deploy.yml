@@ -8,7 +8,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/farmlink
 
 jobs:
   build-and-push:
@@ -47,12 +46,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase image name
+        id: image
+        run: |
+          echo "name=ghcr.io/$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')/farmlink-${{ matrix.service.name }}:latest" >> $GITHUB_OUTPUT
+
       - name: Build and push ${{ matrix.service.name }}
         uses: docker/build-push-action@v5
         with:
           context: ./services/${{ matrix.service.name }}
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ env.IMAGE_PREFIX }}-${{ matrix.service.name }}:latest
+          tags: ${{ steps.image.outputs.name }}
 
   health-check:
     name: Verify all services healthy
@@ -64,13 +68,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Start services with docker-compose
+      - name: Start infrastructure
         run: |
           docker compose up -d postgres mongo redis zookeeper kafka
           echo "Waiting for infrastructure..."
           sleep 30
+
+      - name: Start services
+        run: |
           docker compose up -d --build
-          echo "Waiting for services..."
+          echo "Waiting for services to start..."
           sleep 60
 
       - name: Check all health endpoints
