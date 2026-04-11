@@ -1,0 +1,104 @@
+name: FarmLink CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/farmlink
+
+jobs:
+  build-and-push:
+    name: Build and push all services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        service:
+          - name: auth-service
+            port: 8081
+          - name: order-service
+            port: 8082
+          - name: escrow-service
+            port: 8083
+          - name: gateway
+            port: 8080
+          - name: price-service
+            port: 8084
+          - name: forecast-service
+            port: 8085
+          - name: notification-service
+            port: 8086
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service.name }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ env.IMAGE_PREFIX }}-${{ matrix.service.name }}:latest
+
+  health-check:
+    name: Verify all services healthy
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start services with docker-compose
+        run: |
+          docker compose up -d postgres mongo redis zookeeper kafka
+          echo "Waiting for infrastructure..."
+          sleep 30
+          docker compose up -d --build
+          echo "Waiting for services..."
+          sleep 60
+
+      - name: Check all health endpoints
+        run: |
+          services=("8081" "8082" "8083" "8084" "8085" "8086")
+          names=("auth" "order" "escrow" "price" "forecast" "notification")
+          all_ok=true
+
+          for i in "${!services[@]}"; do
+            port="${services[$i]}"
+            name="${names[$i]}"
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$port/health || echo "000")
+            if [ "$response" = "200" ]; then
+              echo "OK $name-service (:$port)"
+            else
+              echo "FAIL $name-service (:$port) — got HTTP $response"
+              all_ok=false
+            fi
+          done
+
+          if [ "$all_ok" = false ]; then
+            echo "One or more services failed health check"
+            docker compose logs
+            exit 1
+          fi
+
+          echo "All services healthy"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
